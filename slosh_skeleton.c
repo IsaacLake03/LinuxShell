@@ -76,7 +76,6 @@
   */
  int parse_input(char *input, char **args) {
      /* TODO: Your implementation here */
-
      // Exit on command temporarily here for testing
      int count = 0;
 
@@ -93,6 +92,94 @@
      return count;
  }
  
+  /**
+  * Execute the pipe command
+  * 
+  * @param args Array of command arguments (NULL-terminated)
+  * @param cmdIndex Pipe comman index in arg array
+  */
+  void execute_pipe(char **cmdLeft, char **cmdRight) {
+    int fds[2];
+    pipe(fds);
+
+    pid_t child1 = fork();
+    pid_t child2 = fork();
+    if((child1 < 0) || (child2 < 0)){ //error while forking
+        perror("failed fork");
+        exit(EXIT_FAILURE);
+    } else{ //successful forking
+        if(child1 == 0){ // cmdLeft child process
+            signal(SIGINT, SIG_DFL); //reset signal handing
+            close(fds[0]);
+            dup2(fds[1], STDOUT_FILENO); // redirect stdout to pipe
+            close(fds[1]);
+            execvp(cmdLeft[0], cmdLeft); //execute the command
+            perror(cmdLeft[0]);
+            exit(EXIT_FAILURE);
+        }
+        if(child2 == 0){ // cmdRight child process
+            signal(SIGINT, SIG_DFL); // reset signal handing
+            close(fds[1]);
+            dup2(fds[0], STDIN_FILENO); // redirect stdin to pipe
+            close(fds[0]);
+            execvp(cmdRight[0], cmdRight); // execute the command
+            perror(cmdRight[0]);
+            exit(EXIT_FAILURE);
+        }
+    }
+    //parent process
+    int status;
+    close(fds[0]);
+    close(fds[1]);
+    child_running = child1;
+    waitpid(child_running, &status, 0);
+    //if child1 ended with failure
+    if(WEXITSTATUS(status)){printf("Child exited with status %d.\n", WEXITSTATUS(status));}
+    child_running = child2;
+    waitpid(child_running, &status, 0);
+    //if child2 ended with failure
+    if(WEXITSTATUS(status)){printf("Child exited with status %d.\n", WEXITSTATUS(status));}
+  }
+
+  /**
+  * Execute the redirect command
+  * 
+  * @param args Array of command arguments (NULL-terminated)
+  * @param cmdIndex Pipe comman index in arg array
+  * @param clobber Flag for overwritting redirect destination
+  */
+  void execute_redirect(char **args, int cmdIndex, int clobber) {
+    int fd;
+    char *filename = args[cmdIndex + 1];
+    args[cmdIndex] = NULL;
+    if(clobber){fd = open(filename, (O_WRONLY | O_CREAT | O_TRUNC), 0644);}
+    else{fd = open(filename, (O_WRONLY | O_CREAT | O_APPEND), 0644);}
+    if(fd < 0){
+        perror("open");
+        exit(EXIT_FAILURE);
+    }
+    if((child_running = fork()) == 0){ //child process
+        signal(SIGINT, SIG_DFL); //reset signal handing
+        dup2(fd, STDOUT_FILENO); // redirect stdout to the destination file
+        close(fd);
+        execvp(args[0], args); //execute the command
+        perror(args[0]);
+        exit(EXIT_FAILURE);
+     }
+     else if(child_running < 0){ //error while forking
+        perror("failed fork");
+        exit(EXIT_FAILURE);
+     } else { //parent process
+        int status;
+        waitpid(child_running, &status, 0);
+        //if child ended with failure
+        if(WEXITSTATUS(status)){
+            printf("Child exited with status %d.\n", WEXITSTATUS(status));
+        }
+        close(fd);
+    }
+  }
+
  /**
   * Execute the given command with its arguments
   * 
@@ -102,13 +189,6 @@
   * 3. Output redirection (> and >>)
   * 
   * @param args Array of command arguments (NULL-terminated)
-  */
-
-  /*Accounted for commands
-  * 1. ls
-  * 2. cat
-  * 3. pwd
-  * 4. echo
   */
  void execute_command(char **args) {
      /* TODO: Your implementation here */
@@ -120,7 +200,93 @@
       * 4. For pipes, create two child processes connected by a pipe
       * 5. For redirection, use open() and dup2() to redirect stdout
       */
-     
+
+     char *commands[MAX_ARGS][MAX_ARGS];
+     int cmdIndex = 0, argIndex = 0, redirectIndex = -1, overwrite = 0;
+
+     for(int i=0; args[i] != NULL; i++){
+         if(strcmp(args[i], ">") == 0){
+            redirectIndex = i;
+            overwrite = 1;
+         } else if(strcmp(args[i], ">>") == 0){
+            redirectIndex = i;
+         }
+     }
+      
+     for (int i = 0; args[i] != NULL; i++) {
+         if (strcmp(args[i], "|") == 0) {
+             commands[cmdIndex][argIndex] = NULL;
+             cmdIndex++;
+             argIndex = 0;
+         } else {
+             commands[cmdIndex][argIndex] = args[i];
+             argIndex++;
+         }
+     }
+     commands[cmdIndex][argIndex] = NULL;
+     cmdIndex++;
+
+
+    // If there's only one command, execute it directly
+    if (cmdIndex == 1) {
+        if ((child_running = fork()) == 0) { // Child process
+            signal(SIGINT, SIG_DFL); // Reset signal handling
+            execvp(commands[0][0], commands[0]); // Execute the command
+            perror(commands[0][0]);
+            exit(EXIT_FAILURE);
+        } else if (child_running < 0) { // Error while forking
+            perror("fork");
+            exit(EXIT_FAILURE);
+        } else { // Parent process
+            int status;
+            waitpid(child_running, &status, 0);
+            if (WEXITSTATUS(status)) {
+                printf("Child exited with status %d.\n", WEXITSTATUS(status));
+            }
+        }
+        return;
+    }
+
+    int fds[2];
+    int in_fd = STDIN_FILENO; // Input file descriptor for the first command
+
+    for (int i = 0; i < cmdIndex; i++) {
+        pipe(fds); // Create a pipe
+
+        if ((child_running = fork()) == 0) { // Child process
+            signal(SIGINT, SIG_DFL); // Reset signal handling
+
+            // Redirect input
+            if (in_fd != STDIN_FILENO) {
+                dup2(in_fd, STDIN_FILENO);
+                close(in_fd);
+            }
+
+            // Redirect output if not the last command
+            if (i < cmdIndex - 1) {
+                dup2(fds[1], STDOUT_FILENO);
+            }
+            close(fds[0]);
+            close(fds[1]);
+
+            execvp(commands[i][0], commands[i]); // Execute the command
+            perror(commands[i][0]);
+            exit(EXIT_FAILURE);
+        } else if (child_running < 0) { // Error while forking
+            perror("fork");
+            exit(EXIT_FAILURE);
+        } else { // Parent process
+            int status;
+            waitpid(child_running, &status, 0);
+            if (WEXITSTATUS(status)) {
+                printf("Child exited with status %d.\n", WEXITSTATUS(status));
+            }
+
+            // Close the write end of the pipe and update in_fd
+            close(fds[1]);
+            in_fd = fds[0];
+        }
+    }
  }
  
  /**
@@ -158,10 +324,9 @@
      
      /* TODO: Set up signal handling for SIGINT (Ctrl+C) */
      if(signal(SIGINT, sigint_handler) == SIG_ERR) {
-         perror("signal");
-         exit(EXIT_FAILURE);
+        perror("signal");
+        exit(EXIT_FAILURE);
      }
-
 
      while (status) {
          display_prompt();

@@ -1,7 +1,7 @@
 CC = gcc
-CFLAGS = -Wall -Wextra -g
+CFLAGS = -Wall -Wextra -g -std=c99
 TARGET = slosh
-SRC = SLOsh.c
+SRC = slosh_skeleton.c
 
 all: $(TARGET)
 
