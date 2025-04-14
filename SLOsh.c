@@ -98,17 +98,12 @@
   * @param args Array of command arguments (NULL-terminated)
   * @param cmdIndex Pipe comman index in arg array
   */
-  void execute_pipe(char **args, int cmdIndex) {
-    args[cmdIndex] = NULL;
-    char **cmdLeft = args;
-    char **cmdRight = &args[cmdIndex + 1];
-
+  void execute_pipe(char **cmdLeft, char **cmdRight) {
     int fds[2];
     pipe(fds);
 
     pid_t child1 = fork();
     pid_t child2 = fork();
-
     if((child1 < 0) || (child2 < 0)){ //error while forking
         perror("failed fork");
         exit(EXIT_FAILURE);
@@ -123,11 +118,11 @@
             exit(EXIT_FAILURE);
         }
         if(child2 == 0){ // cmdRight child process
-            signal(SIGINT, SIG_DFL); //reset signal handing
+            signal(SIGINT, SIG_DFL); // reset signal handing
             close(fds[1]);
             dup2(fds[0], STDIN_FILENO); // redirect stdin to pipe
             close(fds[0]);
-            execvp(cmdRight[0], cmdRight); //execute the command
+            execvp(cmdRight[0], cmdRight); // execute the command
             perror(cmdRight[0]);
             exit(EXIT_FAILURE);
         }
@@ -196,61 +191,128 @@
   * @param args Array of command arguments (NULL-terminated)
   */
  void execute_command(char **args) {
-     /* TODO: Your implementation here */
-     
-     /* Hints:
-      * 1. Fork a child process
-      * 2. In the child, reset signal handling and execute the command
-      * 3. In the parent, wait for the child and handle its exit status
-      * 4. For pipes, create two child processes connected by a pipe
-      * 5. For redirection, use open() and dup2() to redirect stdout
-      */
+    char *commands[MAX_ARGS][MAX_ARGS];
+    int cmdIndex = 0, argIndex = 0, redirectIndex = -1, overwrite = 0;
 
-     int pipeIndex = -1; //pipe command index in arg array
-     int redirectIndex = -1; //redirect command index in arg array
-     int overwrite = 0; //flag for '>' to clobber the file
-     for(int i = 0; args[i] != NULL; i++){
-        if (strcmp(args[i], "|") == 0){
-            pipeIndex = i;
-        } else if (strcmp(args[i], ">") == 0){
+    // Check for redirection operators
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], ">") == 0) {
             redirectIndex = i;
-            overwrite = 1;
-        } else if(strcmp(args[i], ">>") == 0){
+            overwrite = 1; // Overwrite mode
+        } else if (strcmp(args[i], ">>") == 0) {
             redirectIndex = i;
-        }
-     }
-
-     // *** PIPING ***
-     if(pipeIndex != -1){
-        execute_pipe(args, pipeIndex);
-        return;
-     }
-
-     // *** REDIRECT ***
-     if(redirectIndex != -1){
-        execute_redirect(args, redirectIndex, overwrite);
-        return;
-     }
-
-     // *** REGULAR COMMAND ***
-     if((child_running = fork()) == 0){ //child process
-        signal(SIGINT, SIG_DFL); //reset signal handing
-        execvp(args[0], args); //execute the command
-        perror(args[0]);
-        exit(EXIT_FAILURE);
-     }
-     else if(child_running < 0){ //error while forking
-        perror("failed fork");
-        exit(EXIT_FAILURE);
-     } else { //parent process
-        int status;
-        waitpid(child_running, &status, 0);
-        //if child ended with failure
-        if(WEXITSTATUS(status)){
-            printf("Child exited with status %d.\n", WEXITSTATUS(status));
+            overwrite = 0; // Append mode
         }
     }
- }
+
+    // Split commands by pipe ('|')
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], "|") == 0) {
+            commands[cmdIndex][argIndex] = NULL;
+            cmdIndex++;
+            argIndex = 0;
+        } else if (strcmp(args[i], ">") == 0) {
+            overwrite = 1; // Overwrite mode
+            redirectIndex = argIndex;
+            argIndex++;
+        } else if (strcmp(args[i], ">>") == 0) {
+            overwrite = 0; // Append mode
+            redirectIndex = argIndex;
+            argIndex++;
+        }else {
+            commands[cmdIndex][argIndex] = args[i];
+            argIndex++;
+        }
+    }
+    commands[cmdIndex][argIndex] = NULL;
+    cmdIndex++;
+
+    // Handle single command with redirection
+    if(cmdIndex == 1 && redirectIndex != -1) {
+        execute_redirect(commands[0], redirectIndex, overwrite);
+        return;
+    }
+
+    if (cmdIndex == 1) {
+        if (redirectIndex != -1) {
+            // Call execute_redirect for single command with redirection
+            execute_redirect(args, redirectIndex, overwrite);
+            return;
+        }
+
+        // Execute single command without redirection
+        if ((child_running = fork()) == 0) { // Child process
+            signal(SIGINT, SIG_DFL); // Reset signal handling
+            execvp(commands[0][0], commands[0]); // Execute the command
+            perror(commands[0][0]);
+            exit(EXIT_FAILURE);
+        } else if (child_running < 0) { // Error while forking
+            perror("fork");
+            return;
+        } else { // Parent process
+            int status;
+            waitpid(child_running, &status, 0);
+            if (WEXITSTATUS(status)) {
+                printf("Child exited with status %d.\n", WEXITSTATUS(status));
+            }
+        }
+        return;
+    }
+
+    // Handle multiple commands with pipes
+    int fds[2];
+    int in_fd = STDIN_FILENO; // Input file descriptor for the first command
+
+    for (int i = 0; i < cmdIndex; i++) {
+        pipe(fds); // Create a pipe
+    
+        if ((child_running = fork()) == 0) { // Child process
+            signal(SIGINT, SIG_DFL); // Reset signal handling
+    
+            // Redirect input
+            if (in_fd != STDIN_FILENO) {
+                dup2(in_fd, STDIN_FILENO);
+                close(in_fd);
+            }
+    
+            // Redirect output if not the last command
+            if (i < cmdIndex - 1) {
+                dup2(fds[1], STDOUT_FILENO);
+            } else if (redirectIndex != -1) { // Last command with redirection
+                close(fds[0]);
+                close(fds[1]);
+                execute_redirect(commands[i], redirectIndex, overwrite);
+                exit(EXIT_SUCCESS);
+            }
+    
+            close(fds[0]);
+            close(fds[1]);
+    
+            // Debugging output
+            printf("Executing command: %s\n", commands[i][0]);
+            for (int j = 0; commands[i][j] != NULL; j++) {
+                printf("Arg[%d]: %s\n", j, commands[i][j]);
+            }
+    
+            execvp(commands[i][0], commands[i]); // Execute the command
+            perror(commands[i][0]);
+            exit(EXIT_FAILURE);
+        } else if (child_running < 0) { // Error while forking
+            perror("fork");
+            return;
+        } else { // Parent process
+            int status;
+            waitpid(child_running, &status, 0);
+            if (WEXITSTATUS(status)) {
+                printf("Child exited with status %d.\n", WEXITSTATUS(status));
+            }
+    
+            // Close the write end of the pipe and update in_fd
+            close(fds[1]);
+            in_fd = fds[0];
+        }
+    }
+}
  
  /**
   * Check for and handle built-in commands
